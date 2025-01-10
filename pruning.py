@@ -8,22 +8,10 @@ from PIL import Image
 from tqdm import tqdm
 import yolov6
 
-model = torch.load('yolov5s.pt')
+model = torch.load('yolov6l.pt')
 model = model['model']
-state_dict = model.state_dict()
 
 def find_layers(module, layers=[nn.Linear], name=''):
-    """
-    Recursively find the layers of a certain type in a module.
-
-    Args:
-        module (nn.Module): PyTorch module.
-        layers (list): List of layer types to find.
-        name (str): Name of the module.
-
-    Returns:
-        dict: Dictionary of layers of the given type(s) within the module.
-    """
     if type(module) in layers:
         return {name: module}
     res = {}
@@ -42,78 +30,63 @@ def find(module, name=""):
         res.update(find_layers(
             module, name=name + '.' + name1 if name != '' else name1
         ))
-
+        
 res = find(model, "")
+
+conv_weigths = {}
+for name, module in model.named_modules():
+    if 'block.conv' in name:
+        conv_weigths.update({name : module})
+        
+key_list = list(conv_weigths.keys())
+
 def prune(weight, rate):
     W = weight.data
-    o = W.shape[0]
+    o, c, r, d = W.shape
     num = int(o * rate)
+
+
     l2_norms = torch.sqrt(torch.sum(W ** 2, dim=(1, 2, 3)))
-    _, top_idx = torch.topk(l2_norms, num, dim=0, largest=False)
-    remaining_idx = torch.arange(W.size(0), device=W.device)
-    remaining_idx = remaining_idx[~torch.isin(remaining_idx, top_idx)]
-    if len(top_idx) == o:
-        top_idx = top_idx[:-2]
-    new_W = W[remaining_idx, :, :, :]
-    print(f'before {W.shape[0]} after {new_W.shape[0]}')
-    return new_W, remaining_idx
+    _, top_idx = torch.topk(l2_norms, o - num, dim=0, largest=True)  
 
-
-
-def reshape_layer(next_layer_tensor, remaining_idx, prev_size):
-    weight = next_layer_tensor.data
-
-    if isinstance(remaining_idx, int):
-        remaining_idx = [remaining_idx]  
-    elif isinstance(remaining_idx, torch.Tensor):
-        remaining_idx = remaining_idx.tolist() 
-
-
-    if len(weight.shape) > 1:
-        in_features = weight.shape[1]  
-    else:
-        in_features = weight.shape[0]  
-   
-
-   
-    remaining_idx = [idx for idx in remaining_idx if idx < in_features]
-
- 
-    if len(remaining_idx) >= in_features:
-        return next_layer_tensor
-
+    pruned_W = W[top_idx, :, :, :]
     
-    if len(weight.shape) > 1:  
-        reshaped_tensor = weight[:, remaining_idx, :, :]
-    else:  
-        reshaped_tensor = weight[remaining_idx]
-    return reshaped_tensor
+    return pruned_W
 
-new_state_dict = state_dict
-key_list = list(state_dict.keys())
-new_state_dict = OrderedDict()
-cnt = 0
-no_prune = ['running_mean', 'running_var' , 'num_batches_tracked']
-while cnt < len(key_list):
-    key = key_list[cnt]
+import copy
 
-    if 'conv' in key and len(state_dict[key].shape) > 3:
-        pruned_weight, remaining_idx = prune(state_dict[key], 0.3)  # Prune the layer weights
+def prune_model_and_update(model, pruning_rate):
 
+    pruned_model = copy.deepcopy(model)
+    
+    for name, module in pruned_model.named_modules():
+        if isinstance(module, nn.Conv2d):
+ 
+            weight = module.weight.data
+            pruned_weight = prune(weight, pruning_rate)
 
+            new_out_channels = pruned_weight.shape[0]
+            module.out_channels = new_out_channels
+            module.weight = nn.Parameter(pruned_weight)
+            
+            for next_name, next_module in pruned_model.named_modules():
+                if next_name.startswith(name) and isinstance(next_module, nn.Conv2d):
+                    next_module.in_channels = new_out_channels
+                    break  
+
+    return pruned_model
+
+pruned_model = prune_model_and_update(model, pruning_rate=0.5)
+
+state_dict = model.state_dict()
+
+new_state_dict = {}
+for key in state_dict.keys():
+    if 'block.conv' in key: 
+        pruned_weight = prune(state_dict[key], 0.5)
         new_state_dict[key] = pruned_weight
-
-        while cnt + 1 < len(key_list) and  not any(item in key_list[cnt] for item in no_prune) and '24' not in key_list[cnt + 1]:
-            cnt += 1
-            print('before', state_dict[key_list[cnt]].data.shape)
-            reshaped_tensor = reshape_layer(state_dict[key_list[cnt]], remaining_idx, pruned_weight.shape)
-            new_state_dict[key_list[cnt]] = reshaped_tensor
-            print('after ', new_state_dict[key_list[cnt]].data.shape)
-
-        is_last = '24' in key_list[cnt]
-        if is_last:
-            break  
     else:
+        new_state_dict[key] = state_dict[key]
 
         new_state_dict[key] = state_dict[key]
 
