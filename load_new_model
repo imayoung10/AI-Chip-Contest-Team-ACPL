@@ -1,0 +1,45 @@
+def set_module_by_name(model, name, new_module):
+    components = name.split(".")
+    parent = model
+    for component in components[:-1]:
+        parent = getattr(parent, component)
+    setattr(parent, components[-1], new_module)
+
+for name, module in model.named_modules():
+    if 'conv' in name or 'bn' in name:
+        for pruned_k in pruned_keys:
+            if name in pruned_k and not any(key in pruned_k for key in ['running_mean', 'bias', 'running_var', 'num_batches_tracked']):
+                pruned_o = pruned_dict[pruned_k].shape
+                
+                if 'conv' in name:
+                    new_conv = torch.nn.Conv2d(
+                        in_channels=pruned_o[1],
+                        out_channels=pruned_o[0],
+                        kernel_size=module.kernel_size,
+                        stride=module.stride,
+                        padding=module.padding,
+                        dilation=module.dilation,
+                        bias=module.bias is not None
+                    )
+                    new_conv.weight = torch.nn.Parameter(pruned_dict[pruned_k])
+                    if module.bias is not None:
+                        new_conv.bias = torch.nn.Parameter(pruned_dict.get(pruned_k + '.bias', module.bias))
+                    set_module_by_name(model, name, new_conv)
+                    print(f'Set conv: {name}')
+
+                elif 'bn' in name and isinstance(module, torch.nn.BatchNorm2d):
+                    new_bn = torch.nn.BatchNorm2d(
+                        num_features=pruned_o[0],
+                        eps=module.eps,
+                        momentum=module.momentum,
+                        affine=module.affine,
+                        track_running_stats=module.track_running_stats
+                    )
+                    new_bn.weight = torch.nn.Parameter(pruned_dict.get(pruned_k + '.weight', module.weight))
+                    new_bn.bias = torch.nn.Parameter(pruned_dict.get(pruned_k + '.bias', module.bias))
+                    new_bn.running_mean = torch.nn.Parameter(pruned_dict.get(pruned_k + '.running_mean', module.running_mean))
+                    new_bn.running_var = torch.nn.Parameter(pruned_dict.get(pruned_k + '.running_var', module.running_var))
+                    set_module_by_name(model, name, new_bn)
+                    print(f'Set bn: {name}')
+                                            
+model.load_state_dict(pruned_dict, strict=False)
