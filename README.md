@@ -6,4 +6,4 @@ Yolov5 Furiosa NPU에서 inference 가속화
 
 # Main Concept
 - magnitude Channel-Pruning
-- Implementation without Masking, Instead changing Layers
+- Implementation without Masking, Instead re-defining layers
